@@ -1,14 +1,16 @@
 # telegram_fetcher_render.py
+# Render version — авторизація через BOT TOKEN
 import os
 import asyncio
 from datetime import datetime
 from telethon import TelegramClient, events
 from storage_utils import upload_text, download_text
 
+# === ENV VARIABLES ===
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
+BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 
-# 1 канал = 1 файл у bucket 'raw'
 CHANNELS = [
     "MIRVALUTY",
     "GARANT",
@@ -20,6 +22,7 @@ CHANNELS = [
 ]
 
 SESSION_NAME = "render_fetcher_session"
+
 
 def make_block(channel: str, message_id: int, version: int, text: str, ts: datetime, edited_ts=None) -> str:
     lines = []
@@ -33,6 +36,7 @@ def make_block(channel: str, message_id: int, version: int, text: str, ts: datet
     lines.append(text or "")
     lines.append("=" * 120)
     return "\n".join(lines) + "\n"
+
 
 def detect_next_version(existing: str, message_id: int) -> int:
     v = 0
@@ -49,6 +53,7 @@ def detect_next_version(existing: str, message_id: int) -> int:
                 pass
     return v + 1 if v > 0 else 1
 
+
 async def bootstrap_history(client: TelegramClient, name: str):
     filename = f"{name}_raw.txt"
     current = download_text(filename)
@@ -62,14 +67,19 @@ async def bootstrap_history(client: TelegramClient, name: str):
         ts = m.date
         block = make_block(name, m.id, 1, m.message, ts, None)
         msgs.append(block)
-    msgs.reverse()  # хронологічно
+    msgs.reverse()
     content = "".join(msgs)
     upload_text(filename, content, upsert=True)
     print(f"[INIT] Snapshot → {filename} ({len(msgs)} msgs)")
 
+
 async def main():
+    print("[FETCHER] Starting (Render, BOT mode)...")
     async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
-        print("[FETCHER] Connected. Bootstrapping...")
+        # Авторизація через BOT TOKEN
+        await client.start(bot_token=BOT_TOKEN)
+        print("[FETCHER] Connected via bot token. Bootstrapping...")
+
         for ch in CHANNELS:
             try:
                 await bootstrap_history(client, ch)
@@ -80,7 +90,7 @@ async def main():
         async def on_new_message(event):
             try:
                 name = (await event.get_chat()).username or (await event.get_chat()).title
-                name = str(name).upper().replace('@','').replace(' ', '_')
+                name = str(name).upper().replace("@", "").replace(" ", "_")
                 filename = f"{name}_raw.txt"
                 existing = download_text(filename)
                 version = detect_next_version(existing, event.id)
@@ -95,7 +105,7 @@ async def main():
         async def on_edit_message(event):
             try:
                 name = (await event.get_chat()).username or (await event.get_chat()).title
-                name = str(name).upper().replace('@','').replace(' ', '_')
+                name = str(name).upper().replace("@", "").replace(" ", "_")
                 filename = f"{name}_raw.txt"
                 existing = download_text(filename)
                 version = detect_next_version(existing, event.id)
@@ -106,8 +116,9 @@ async def main():
             except Exception as e:
                 print(f"[ERR] on_edit_message: {e}")
 
-        print("[FETCHER] Listening...")
+        print("[FETCHER] Listening for new messages...")
         await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
