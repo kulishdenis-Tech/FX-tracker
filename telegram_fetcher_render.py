@@ -1,28 +1,24 @@
 import os
 import asyncio
-from telethon import TelegramClient
-from storage_utils import upload_text, download_text  # cloud-сторедж Supabase
-from dotenv import load_dotenv
 from datetime import datetime
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from storage_utils import upload_text, download_text
+from dotenv import load_dotenv
 
-# --- Завантаження змінних оточення ---
+# ──────────────── ЗМІННІ ОТОЧЕННЯ ────────────────
 load_dotenv()
 
-# Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Telegram
+TG_API_ID = int(os.getenv("TG_API_ID", "6"))  # резервне значення — офіційний Telegram test ID
+TG_API_HASH = os.getenv("TG_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-API_ID = int(os.getenv("TG_API_ID", 6))  # Тестовий ID (Telegram default)
-API_HASH = os.getenv("TG_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e")
-
-if not TG_BOT_TOKEN:
-    raise ValueError("❌ TG_BOT_TOKEN не знайдено у змінних оточення Render!")
-
+TG_USER_SESSION = os.getenv("TG_USER_SESSION")  # 🔸 якщо є — працюємо як юзер
 SESSION_NAME = "render_fetcher_session"
 
-# --- Канали ---
+# ──────────────── КАНАЛИ ────────────────
 CHANNELS = {
     "MIRVALUTY": "mirvaluty",
     "GARANT": "obmen_kyiv",
@@ -33,17 +29,28 @@ CHANNELS = {
     "SWAPS": "obmen_usd",
 }
 
-HISTORY_LIMIT = 300  # скільки повідомлень тягнути при ініціалізації
+HISTORY_LIMIT = 300
 
 
-# --- Основна функція ---
+# ──────────────── ОСНОВНА ЛОГІКА ────────────────
 async def fetch_channel_history():
-    print("[START] Telegram Fetcher (BOT mode, Render)")
+    print("[START] Telegram Fetcher (Render)")
+    client = None
 
-    # створюємо клієнт із фіктивними API_ID та API_HASH
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-    await client.start(bot_token=TG_BOT_TOKEN)
-    print("[TG] ✅ Авторизація через бот-токен успішна")
+    # ✅ Якщо є user session — підключаємось як юзер
+    if TG_USER_SESSION:
+        print("[MODE] Using USER session (StringSession). Full access ✅")
+        client = TelegramClient(StringSession(TG_USER_SESSION), TG_API_ID, TG_API_HASH)
+        await client.start()
+    # ⚠️ Інакше — fallback на бот-токен
+    elif TG_BOT_TOKEN:
+        print("[MODE] Using BOT token (restricted mode ⚠️)")
+        client = TelegramClient(SESSION_NAME, TG_API_ID, TG_API_HASH)
+        await client.start(bot_token=TG_BOT_TOKEN)
+    else:
+        raise ValueError("❌ No TG_USER_SESSION or TG_BOT_TOKEN provided!")
+
+    print("[TG] ✅ Авторизація успішна")
 
     for label, username in CHANNELS.items():
         try:
@@ -52,20 +59,21 @@ async def fetch_channel_history():
 
             async for msg in client.iter_messages(username, limit=HISTORY_LIMIT):
                 if msg.text:
-                    line = (
+                    block = (
                         f"[{msg.date.strftime('%Y-%m-%d %H:%M:%S')}]\n"
                         f"{msg.text}\n"
                         + "-" * 80
                     )
-                    messages.append(line)
+                    messages.append(block)
 
             if messages:
-                raw_text = "\n".join(reversed(messages))  # хронологічно
+                content = "\n".join(reversed(messages))
                 fname = f"{label}_raw.txt"
-                upload_text(fname, raw_text, upsert=True)
-                print(f"[STORE] ☁️ {fname} збережено у Supabase Storage ({len(messages)} msgs)")
+                upload_text(fname, content, upsert=True)
+                print(f"[STORE] ☁️ {fname} → Supabase ({len(messages)} msgs)")
             else:
-                print(f"[TG] ⚠️ {label}: немає текстових повідомлень.")
+                print(f"[TG] ⚠️ {label}: немає текстових повідомлень")
+
         except Exception as e:
             print(f"[ERR] {label}: {e}")
 
@@ -73,5 +81,6 @@ async def fetch_channel_history():
     print("[DONE] ✅ Завершено")
 
 
+# ──────────────── ЗАПУСК ────────────────
 if __name__ == "__main__":
     asyncio.run(fetch_channel_history())
