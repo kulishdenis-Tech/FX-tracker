@@ -5,11 +5,17 @@ from storage_utils import upload_text, download_text  # cloud-сторедж Sup
 from dotenv import load_dotenv
 from datetime import datetime
 
-# --- Завантажуємо змінні оточення ---
+# --- Завантаження змінних оточення ---
 load_dotenv()
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+
+# Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Telegram
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+API_ID = int(os.getenv("TG_API_ID", 6))  # Тестовий ID (Telegram default)
+API_HASH = os.getenv("TG_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e")
 
 if not TG_BOT_TOKEN:
     raise ValueError("❌ TG_BOT_TOKEN не знайдено у змінних оточення Render!")
@@ -30,11 +36,12 @@ CHANNELS = {
 HISTORY_LIMIT = 300  # скільки повідомлень тягнути при ініціалізації
 
 
+# --- Основна функція ---
 async def fetch_channel_history():
     print("[START] Telegram Fetcher (BOT mode, Render)")
 
-    # створюємо клієнт без API_ID/API_HASH
-    client = TelegramClient(None, 0, "")
+    # створюємо клієнт із фіктивними API_ID та API_HASH
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
     await client.start(bot_token=TG_BOT_TOKEN)
     print("[TG] ✅ Авторизація через бот-токен успішна")
 
@@ -53,7 +60,7 @@ async def fetch_channel_history():
                     messages.append(line)
 
             if messages:
-                raw_text = "\n".join(reversed(messages))
+                raw_text = "\n".join(reversed(messages))  # хронологічно
                 fname = f"{label}_raw.txt"
                 upload_text(fname, raw_text, upsert=True)
                 print(f"[STORE] ☁️ {fname} збережено у Supabase Storage ({len(messages)} msgs)")
