@@ -1,138 +1,85 @@
+# === telegram_fetcher_render.py ===
 import os
 import asyncio
+import logging
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from storage_utils import upload_text, download_text
-from dotenv import load_dotenv
+from storage_utils import save_to_supabase  # твоя функція для збереження
 
-# ──────────────── CONFIG ────────────────
-load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# ======== ЛОГИ ========
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-TG_API_ID = int(os.getenv("TG_API_ID", "6"))
-TG_API_HASH = os.getenv("TG_API_HASH", "eb06d4abfb49dc3eeb1aeb98ae0f581e")
-TG_USER_SESSION = os.getenv("TG_USER_SESSION")
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+# ======== ЗМІННІ СЕРЕДОВИЩА ========
+API_ID = int(os.getenv("TG_API_ID", "0"))
+API_HASH = os.getenv("TG_API_HASH", "")
+USER_SESSION = os.getenv("TG_USER_SESSION", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-SESSION_NAME = "render_fetcher_session"
+# список каналів (через кому)
+CHANNELS_RAW = os.getenv("CHANNELS", "@mirvaluty,@obmen_kyiv")
+CHANNELS = [x.strip() for x in CHANNELS_RAW.split(",") if x.strip()]
 
-CHANNELS = {
-    "MIRVALUTY": "@mirvaluty",
-    "GARANT": "@obmen_kyiv",
-    "KIT_GROUP": "@obmenka_kievua",
-    "CHANGE_KYIV": "@kiev_change",
-    "VALUTA_KIEV": "@valuta_kiev",
-    "UACOIN": "@uacoin",
-    "SWAPS": "@Obmen_usd"
-}
+# ======== ПЕРЕВІРКА НАЯВНОСТІ ========
+if not all([API_ID, API_HASH, USER_SESSION, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY]):
+    logging.error("❌ Відсутні необхідні змінні середовища. Перевір налаштування Render ENV.")
+    raise SystemExit(1)
 
+# ======== СТВОРЕННЯ КЛІЄНТА ========
+def make_client() -> TelegramClient:
+    try:
+        return TelegramClient(StringSession(USER_SESSION), API_ID, API_HASH)
+    except Exception as e:
+        logging.exception("Помилка при створенні Telegram клієнта: %s", e)
+        raise
 
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# ======== ОСНОВНА ФУНКЦІЯ ========
+async def run():
+    client = make_client()
+    await client.connect()
+    logging.info("🔌 Підключення до Telegram виконано")
 
-
-def make_block(channel: str, message_id: int, version: int, text: str, ts: datetime, edited_ts=None) -> str:
-    lines = [
-        f"[CHANNEL] {channel}",
-        f"[MESSAGE_ID] {message_id}",
-        f"[VERSION] v{version}",
-        f"[DATE] {ts.strftime('%Y-%m-%d %H:%M:%S')}",
-    ]
-    if edited_ts:
-        lines.append(f"[EDITED] {edited_ts.strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("-" * 100)
-    lines.append(text or "")
-    lines.append("=" * 120)
-    return "\n".join(lines) + "\n"
-
-
-def detect_next_version(existing: str, message_id: int) -> int:
-    v = 0
-    key = f"[MESSAGE_ID] {message_id}"
-    for line in existing.splitlines():
-        if line.strip() == key:
-            v = max(v, 1)
-        if v >= 1 and line.startswith("[VERSION] v"):
-            try:
-                num = int(line.split("v")[-1].strip())
-                v = max(v, num)
-            except:
-                pass
-    return v + 1 if v > 0 else 1
-
-
-async def bootstrap_history(client: TelegramClient, name: str, username: str):
-    filename = f"{name}_raw.txt"
-    current = download_text(filename)
-    if current:
-        print(f"[INIT] {filename} вже існує, пропускаю початкове завантаження.")
+    if not await client.is_user_authorized():
+        logging.error("❌ USER_SESSION недійсний. Згенеруй новий TG_USER_SESSION.")
         return
 
-    print(f"[INIT] Завантажую історію {name}…")
-    msgs = []
-    async for m in client.iter_messages(username, limit=300):
-        if not m.message:
-            continue
-        block = make_block(name, m.id, 1, m.message, m.date)
-        msgs.append(block)
-    msgs.reverse()
-    upload_text(filename, "".join(msgs))
-    print(f"[INIT] Snapshot {name} готовий ({len(msgs)} повідомлень).")
+    logging.info("✅ Авторизація успішна")
+    logging.info(f"📡 Слухаємо канали: {', '.join(CHANNELS)}")
 
-
-async def main():
-    print("[START] Telegram Fetcher (Render, continuous mode)")
-    if TG_USER_SESSION:
-        client = TelegramClient(StringSession(TG_USER_SESSION), TG_API_ID, TG_API_HASH)
-        await client.start()
-        print("[MODE] ✅ USER session active")
-    else:
-        client = TelegramClient(SESSION_NAME, TG_API_ID, TG_API_HASH)
-        await client.start(bot_token=TG_BOT_TOKEN)
-        print("[MODE] ⚙️ BOT session active (обмежений доступ)")
-
-    for name, username in CHANNELS.items():
-        await bootstrap_history(client, name, username)
-
-    print(f"[{now_str()}] [LISTENING] Всі канали запущено.")
-
-    @client.on(events.NewMessage(chats=list(CHANNELS.values())))
-    async def on_new_message(event):
+    @client.on(events.NewMessage(chats=CHANNELS))
+    async def handler(event):
         try:
-            chat = await event.get_chat()
-            alias = next((a for a, u in CHANNELS.items() if u.lower().lstrip("@") == chat.username.lower()), chat.username)
-            filename = f"{alias}_raw.txt"
-            existing = download_text(filename)
-            version = detect_next_version(existing, event.id)
-            block = make_block(alias, event.id, version, event.message.message or "", event.date)
-            new_content = (existing + ("\n" if existing and not existing.endswith("\n") else "") + block)
-            upload_text(filename, new_content)
-            print(f"[NEW] {alias} #{event.id} v{version}")
-        except Exception as e:
-            print(f"[ERR] on_new_message: {e}")
+            chat = getattr(event.chat, "username", "невідомо")
+            text = event.message.message or ""
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logging.info(f"💬 [{chat}] {text[:100].replace(chr(10), ' ')}")
 
-    @client.on(events.MessageEdited(chats=list(CHANNELS.values())))
-    async def on_edit_message(event):
-        try:
-            chat = await event.get_chat()
-            alias = next((a for a, u in CHANNELS.items() if u.lower().lstrip("@") == chat.username.lower()), chat.username)
-            filename = f"{alias}_raw.txt"
-            existing = download_text(filename)
-            version = detect_next_version(existing, event.id)
-            block = make_block(alias, event.id, version, event.message.message or "", event.date, event.edit_date)
-            new_content = (existing + ("\n" if existing and not existing.endswith("\n") else "") + block)
-            upload_text(filename, new_content)
-            print(f"[EDIT] {alias} #{event.id} v{version}")
-        except Exception as e:
-            print(f"[ERR] on_edit_message: {e}")
+            await save_to_supabase(
+                chat=chat,
+                message=text,
+                timestamp=ts,
+            )
 
+        except Exception as e:
+            logging.exception("Помилка під час обробки повідомлення: %s", e)
+
+    logging.info("🚀 Worker запущено. Очікуємо нові повідомлення...")
     await client.run_until_disconnected()
 
-
+# ======== ЦИКЛ З АВТОРЕСТАРТОМ ========
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print(f"[{now_str()}] [EXIT] Зупинено користувачем.")
+    delay = 5
+    while True:
+        try:
+            asyncio.run(run())
+        except Exception as e:
+            logging.exception("❗ Worker впав: %s", e)
+            logging.info("♻️ Перезапуск через %s сек...", delay)
+            asyncio.run(asyncio.sleep(delay))
+            delay = min(delay * 2, 60)
+        else:
+            delay = 5
