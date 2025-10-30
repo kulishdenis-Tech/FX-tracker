@@ -1,42 +1,75 @@
-import os, logging
+import os
+import logging
+import time
 from supabase import create_client, Client
+from storage3.exceptions import StorageApiError
 
+# === 1. ENV ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    logging.error("❌ SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY відсутні")
+    logging.error("❌ Відсутні SUPABASE_URL або SUPABASE_SERVICE_ROLE_KEY")
     raise SystemExit(1)
 
+# === 2. Ініціалізація клієнта ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-logging.info("✅ Supabase клієнт ініціалізовано (bucket 'raw').")
+BUCKET = "raw"
 
-def _read_current(filename: str) -> str:
+logging.info(f"✅ Supabase Storage ініціалізовано (bucket: '{BUCKET}')")
+
+
+# === 3. Допоміжна функція — зчитування існуючого файлу ===
+def read_current_file(filename: str) -> str:
+    """Повертає поточний вміст файлу з Supabase Storage, якщо існує"""
     try:
-        b = supabase.storage.from_("raw").download(filename)  # 200 OK або помилка
-        return b.decode("utf-8")
+        data = supabase.storage.from_(BUCKET).download(filename)
+        return data.decode("utf-8")
     except Exception:
-        return ""  # файла ще нема
+        return ""
 
-async def save_to_supabase(channel_name: str, block: str):
+
+# === 4. Основна функція запису ===
+async def save_to_supabase(channel_name: str, new_block: str):
     """
-    Препендимо блок у raw/{CHANNEL}_raw.txt
-    - якщо файл існує -> update (перезапис)
-    - якщо нема        -> upload (створення)
+    Додає новий блок у початок RAW-файлу (оновлює або створює його в Supabase Storage).
     """
     filename = f"{channel_name.upper()}_raw.txt"
-    try:
-        old = _read_current(filename)
-        new_content = (block or "") + (old or "")
-        data = new_content.encode("utf-8")
+    retries = 3
 
-        if old == "":  # файла ще не було
-            # створюємо
-            supabase.storage.from_("raw").upload(filename, data, file_options={"contentType": "text/plain; charset=utf-8"})
-            logging.info(f"🆕 Створено raw/{filename}")
-        else:
-            # перезаписуємо існуючий
-            supabase.storage.from_("raw").update(filename, data, file_options={"contentType": "text/plain; charset=utf-8"})
-            logging.info(f"♻️ Оновлено raw/{filename}")
+    for attempt in range(1, retries + 1):
+        try:
+            old_content = read_current_file(filename)
+            new_content = (new_block or "") + (old_content or "")
+            data = new_content.encode("utf-8")
 
-    except Exception as e:
-        logging.exception("❌ Помилка запису у Supabase Storage (raw/%s): %s", filename, e)
+            # спробуємо upload — якщо файл існує, буде 409 (Duplicate)
+            try:
+                supabase.storage.from_(BUCKET).upload(
+                    filename,
+                    data,
+                    file_options={"contentType": "text/plain; charset=utf-8"}
+                )
+                logging.info(f"🆕 [{channel_name}] Створено новий файл {filename}")
+            except StorageApiError as e:
+                if e.args and "Duplicate" in str(e):
+                    # оновлюємо файл якщо вже існує
+                    supabase.storage.from_(BUCKET).update(
+                        filename,
+                        data,
+                        file_options={"contentType": "text/plain; charset=utf-8"}
+                    )
+                    logging.info(f"♻️ [{channel_name}] Оновлено існуючий файл {filename}")
+                else:
+                    raise
+
+            return  # успішно завершено — вихід
+
+        except Exception as e:
+            logging.error(f"⚠️ [{channel_name}] Помилка запису (спроба {attempt}/{retries}): {e}")
+            if attempt < retries:
+                sleep_time = attempt * 3
+                logging.info(f"🔁 Повтор через {sleep_time} сек...")
+                time.sleep(sleep_time)
+            else:
+                logging.exception(f"❌ [{channel_name}] Не вдалося записати після {retries} спроб.")
