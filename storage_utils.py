@@ -1,53 +1,42 @@
-# === storage_utils.py ===
-# Зберігає RAW блоки у Supabase Storage → bucket 'raw'
-import os
-import logging
+import os, logging
 from supabase import create_client, Client
 
-# ======== Ініціалізація клієнта Supabase ========
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    logging.error("❌ Не задані SUPABASE_URL або SUPABASE_SERVICE_ROLE_KEY.")
+    logging.error("❌ SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY відсутні")
     raise SystemExit(1)
 
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    logging.info("✅ Supabase клієнт ініціалізовано (bucket 'raw').")
-except Exception as e:
-    logging.exception("❌ Помилка створення клієнта Supabase: %s", e)
-    raise
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+logging.info("✅ Supabase клієнт ініціалізовано (bucket 'raw').")
 
+def _read_current(filename: str) -> str:
+    try:
+        b = supabase.storage.from_("raw").download(filename)  # 200 OK або помилка
+        return b.decode("utf-8")
+    except Exception:
+        return ""  # файла ще нема
 
-# ======== Функція збереження RAW ========
 async def save_to_supabase(channel_name: str, block: str):
     """
-    Додає блок зверху у файл Supabase Storage:
-      raw/{CHANNEL}_raw.txt
-    Нові повідомлення зверху, старі нижче.
+    Препендимо блок у raw/{CHANNEL}_raw.txt
+    - якщо файл існує -> update (перезапис)
+    - якщо нема        -> upload (створення)
     """
+    filename = f"{channel_name.upper()}_raw.txt"
     try:
-        filename = f"{channel_name.upper()}_raw.txt"
+        old = _read_current(filename)
+        new_content = (block or "") + (old or "")
+        data = new_content.encode("utf-8")
 
-        # 1️⃣ Завантажуємо існуючий вміст (якщо файл є)
-        try:
-            existing_bytes = supabase.storage.from_("raw").download(filename)
-            existing_text = existing_bytes.decode("utf-8")
-        except Exception:
-            existing_text = ""
-
-        # 2️⃣ Додаємо новий блок зверху
-        new_content = block + existing_text
-
-        # 3️⃣ Завантажуємо оновлений файл у Supabase Storage
-        #    (метод upload автоматично перезапише існуючий файл)
-        supabase.storage.from_("raw").upload(
-            filename,
-            new_content.encode("utf-8")
-        )
-
-        logging.info(f"🗄️ Оновлено Supabase файл: raw/{filename}")
+        if old == "":  # файла ще не було
+            # створюємо
+            supabase.storage.from_("raw").upload(filename, data, file_options={"contentType": "text/plain; charset=utf-8"})
+            logging.info(f"🆕 Створено raw/{filename}")
+        else:
+            # перезаписуємо існуючий
+            supabase.storage.from_("raw").update(filename, data, file_options={"contentType": "text/plain; charset=utf-8"})
+            logging.info(f"♻️ Оновлено raw/{filename}")
 
     except Exception as e:
-        logging.exception("❌ Помилка при записі у Supabase Storage (raw): %s", e)
+        logging.exception("❌ Помилка запису у Supabase Storage (raw/%s): %s", filename, e)
