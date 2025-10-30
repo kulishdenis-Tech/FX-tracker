@@ -1,11 +1,20 @@
 import os
 import asyncio
 import logging
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from storage_utils import save_to_supabase
+
+# === ЧАСОВА ЗОНА ===
+os.environ["TZ"] = "Europe/Kyiv"
+try:
+    time.tzset()
+except Exception:
+    pass
+TZ = ZoneInfo("Europe/Kyiv")
 
 # === LOGGING ===
 logging.basicConfig(
@@ -14,19 +23,15 @@ logging.basicConfig(
     force=True
 )
 
-# === TIMEZONE ===
-TZ = ZoneInfo("Europe/Kyiv")
-
 # === ENV ===
 API_ID = int(os.getenv("TG_API_ID", "0"))
 API_HASH = os.getenv("TG_API_HASH", "")
 USER_SESSION = os.getenv("TG_USER_SESSION", "")
-
 if not (API_ID and API_HASH and USER_SESSION):
     logging.error("❌ TG_API_ID / TG_API_HASH / TG_USER_SESSION відсутні")
     raise SystemExit(1)
 
-# === КАНАЛИ ДЛЯ МОНІТОРИНГУ ===
+# === КАНАЛИ ===
 CHANNELS = {
     "MIRVALUTY": "@mirvaluty",
     "GARANT": "@obmen_kyiv",
@@ -39,11 +44,12 @@ CHANNELS = {
 
 
 # === ДОПОМІЖНІ ===
-def local(dt):
+def local_time(dt):
     return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S") if dt else ""
 
 
 def build_block(channel, msg_id, ver, date, edited, text):
+    """Формат блоку як у локальній версії"""
     return (
         "=" * 100 + "\n"
         + f"[CHANNEL] {channel}\n"
@@ -58,13 +64,14 @@ def build_block(channel, msg_id, ver, date, edited, text):
 
 
 # === HEARTBEAT ===
-async def heartbeat():
+async def heartbeat(versions):
     while True:
-        logging.info("💓 Worker alive — все стабільно")
+        total_msgs = sum(len(v) for v in versions.values())
+        logging.info(f"💓 Worker alive — оброблено {total_msgs} повідомлень")
         await asyncio.sleep(600)
 
 
-# === ГОЛОВНА ФУНКЦІЯ ===
+# === ГОЛОВНА ===
 async def main():
     logging.info("🚀 Telegram Fetcher (Render Worker) стартує...")
     client = TelegramClient(StringSession(USER_SESSION), API_ID, API_HASH)
@@ -75,29 +82,50 @@ async def main():
 
         versions = {name: {} for name in CHANNELS}
 
-        async def handle_message(msg, name):
+        async def handle_message(msg, name, init_mode=False):
             txt = msg.message or ""
             mid = str(msg.id)
-            date = local(msg.date)
-            edited = local(msg.edit_date) if msg.edit_date else ""
+            date = local_time(msg.date)
+            edited = local_time(msg.edit_date) if msg.edit_date else ""
 
-            # версії
             if mid in versions[name] and edited:
                 versions[name][mid] += 1
+                action = "оновлено існуюче"
             elif mid not in versions[name]:
                 versions[name][mid] = 1
+                action = "нове повідомлення"
             else:
+                action = "пропущено без змін"
                 return
 
             block = build_block(name, mid, versions[name][mid], date, edited, txt)
             await save_to_supabase(name, block)
-            logging.info(f"💾 [{name}] збережено id={mid} (v{versions[name][mid]}) — довжина {len(block)}")
 
-        # підписка на канали
+            prefix = "🔄 [INIT]" if init_mode else "📩"
+            logging.info(
+                f"{prefix} [{name}] {action} id={mid} (v{versions[name][mid]}) | "
+                f"Дата {date} | Довжина блоку {len(block)}"
+            )
+            logging.info(f"💾 [{name}] Оновлено файл у Supabase ✅")
+
+        # === Ініціалізація — підтягнути останні 10 повідомлень ===
+        logging.info("📊 Ініціалізація: зчитую останні 10 повідомлень з кожного каналу...")
         for name, ref in CHANNELS.items():
             try:
                 ent = await client.get_entity(ref)
-                logging.info(f"📡 Моніторимо канал: {name} ({ref})")
+                count = 0
+                async for msg in client.iter_messages(ent, limit=10):
+                    await handle_message(msg, name, init_mode=True)
+                    count += 1
+                logging.info(f"📗 [{name}] Ініціалізовано {count} повідомлень.")
+            except Exception as e:
+                logging.error(f"⚠️ Ініціалізація {name} не вдалася: {e}")
+
+        # === Підключення до каналів у реальному часі ===
+        for name, ref in CHANNELS.items():
+            try:
+                ent = await client.get_entity(ref)
+                logging.info(f"📡 Читаю канал: {name} ({ref}) — очікування нових повідомлень...")
             except Exception as e:
                 logging.error(f"⚠️ Не вдалося отримати entity для {name}: {e}")
                 continue
@@ -110,11 +138,12 @@ async def main():
             async def edited_message(event, _n=name):
                 await handle_message(event.message, _n)
 
-        asyncio.create_task(heartbeat())
+        logging.info("✅ Усі канали активні. Очікуємо оновлення...")
+        asyncio.create_task(heartbeat(versions))
         await client.run_until_disconnected()
 
 
-# === БЕЗПЕРЕРВНИЙ ЦИКЛ (РЕСТАРТ ПРИ ЗБОЇ) ===
+# === РЕСТАРТЕР ===
 if __name__ == "__main__":
     backoff = 5
     while True:
