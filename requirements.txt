@@ -1,3 +1,4 @@
-supabase
-telethon
-python-dotenv
+telethon==1.36.0
+supabase==2.6.0
+python-dotenv==1.0.1
+uvloop==0.20.0 ; sys_platform != 'win32'
