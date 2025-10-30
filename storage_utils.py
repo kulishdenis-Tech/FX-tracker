@@ -4,6 +4,7 @@ import os
 import logging
 from supabase import create_client, Client
 
+# ======== Ініціалізація клієнта Supabase ========
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -19,29 +20,31 @@ except Exception as e:
     raise
 
 
+# ======== Функція збереження RAW ========
 async def save_to_supabase(channel_name: str, block: str):
     """
     Додає блок зверху у файл Supabase Storage:
       raw/{CHANNEL}_raw.txt
+    Нові повідомлення зверху, старі нижче.
     """
     try:
         filename = f"{channel_name.upper()}_raw.txt"
 
-        # 1️⃣ Завантажуємо існуючий вміст
+        # 1️⃣ Завантажуємо існуючий вміст (якщо файл є)
         try:
             existing_bytes = supabase.storage.from_("raw").download(filename)
             existing_text = existing_bytes.decode("utf-8")
         except Exception:
             existing_text = ""
 
-        # 2️⃣ Новий контент зверху
+        # 2️⃣ Додаємо новий блок зверху
         new_content = block + existing_text
 
-        # 3️⃣ Завантаження назад у Storage
+        # 3️⃣ Завантажуємо оновлений файл у Supabase Storage
+        #    (метод upload автоматично перезапише існуючий файл)
         supabase.storage.from_("raw").upload(
             filename,
-            new_content.encode("utf-8"),
-            upsert=True
+            new_content.encode("utf-8")
         )
 
         logging.info(f"🗄️ Оновлено Supabase файл: raw/{filename}")
